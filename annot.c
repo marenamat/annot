@@ -1,3 +1,11 @@
+/*
+ * Command line output annotator.
+ *
+ * (c) 2019 Maria Matejka <mq@ucw.cz>
+ *
+ * Can be freely distributed and used under the terms of the GNU GPL.
+ */
+
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 201906L
 
