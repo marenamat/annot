@@ -1,0 +1,9 @@
+Annot is an output annotator.
+
+Usage:
+annot command [args ...]
+
+Annot runs the command, passes stdin through and reads stdout and stderr line
+by line, annotating every line by the timestamp when it was received.
+
+There are currently no command line options.
