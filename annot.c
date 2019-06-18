@@ -339,13 +339,17 @@ static void process_signal(int fd) {
 void usage(int exitcode) {
   fputs(
       "Output and error annotator. Usage:\n"
+      "\n"
       "	annot [-i] [-D debugfile] command [args]\n"
       "	annot [-h]\n"
       "\n"
-      "Runs the given command with args.\n"
+      "Runs the given command with args and annotates its stdout and stderr\n"
+      "by current date and time. If you page the output by less or more,\n"
+      "the times may get shift due to buffering.\n"
+      "\n"
       "Options:\n"
       "	-D debugfile	write debug messages to this file\n"
-      " -i	read from stdin (may break pagers and others in the pipeline\n"
+      "	-i	read from stdin (may break pagers and others in the pipeline\n"
       "		who are reading directly from tty)\n"
       "	-h	show this help and exit\n"
       , stderr);
@@ -381,7 +385,7 @@ int main(int argc, char **argv) {
   }
 
   if (optind >= argc) {
-    fprintf(stderr, "Command expected");
+    fprintf(stderr, "Command expected.\n");
     usage(2);
   }
 
