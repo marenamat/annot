@@ -51,8 +51,6 @@ struct channel {
   int ifd, ofd, idx;
   uint ipp, opp;
   uint bol:1;
-  uint ird:1;
-  uint ord:1;
   uint iev:1;
   uint oev:1;
   uint hup:1;
@@ -107,6 +105,7 @@ static size_t channel_annotate(uint idx, char *dest) {
 }
 
 static void channel_write(uint idx);
+static void channel_flush(uint idx);
 
 static void channel_close(uint idx) {
   struct channel *ch = channels[idx];
@@ -129,53 +128,15 @@ static void channel_close_in(uint idx) {
   if (ch->bfrom == ch->bto)
     return channel_close(idx);
 
-  ch->hup = 1;
   ch->iev = 0;
-  if (ch->ord)
-    channel_write(idx);
-}
-
-static void channel_ready_both(uint idx) {
-  struct channel *ch = channels[idx];
-  while (1) {
-    /* Write something if we have any data */
-    if (ch->bto > ch->bfrom)
-      channel_write(idx);
-
-    /* Write may have closed the channel */
-    if (!channels[idx])
-      return;
-
-    /* Read some data */
-    ssize_t sz = read(ch->ifd, ch->bto, (ch->bend - ch->bto));
-    if (sz < 0) {
-      if (errno == EAGAIN) {
-	if (ch->hup)
-	  return channel_close_in(idx);
-
-	ch->ird = 0;
-	return channel_wait_in(idx);
-      }
-
-      fprintf(stderr, "Error reading from %d: %m\n", ch->ifd);
-      fatal();
-    }
-
-    if (sz == 0)
-      channel_close_in(idx);
-
-    /* Close in may have closed the channel at all */
-    if (!channels[idx])
-      return;
-
-    ch->bto += sz;
-
-    debug("Channel %d read %d bytes of data\n", idx, sz);
-  }
+  channel_flush(idx);
 }
 
 static void channel_write(uint idx) {
   struct channel *ch = channels[idx];
+  debug("Channel write: %d\n", idx);
+
+  ch->oev = 0;
   while (1) {
     /* Prepend annotation if we should do it. */
     if (ch->fmtpre) {
@@ -198,10 +159,8 @@ static void channel_write(uint idx) {
     ssize_t sz = write(ch->ofd, ch->bfrom, ch->bnl - ch->bfrom);
     debug("Write output: %zd (%d -> %m)\n", sz, errno);
     if (sz < 0) {
-      if (errno == EAGAIN) {
-	ch->ord = 0;
+      if (errno == EAGAIN)
 	return channel_wait_out(idx);
-      }
 
       fprintf(stderr, "Error writing to %d: %m\n", ch->ofd);
       fatal();
@@ -224,6 +183,7 @@ static void channel_write(uint idx) {
 	return channel_close(idx);
 
       ch->bfrom = ch->bto = ch->buf + ch->bskip;
+      channel_wait_in(idx);
       return;
     }
 
@@ -240,33 +200,41 @@ static void channel_write(uint idx) {
   }
 }
 
-static void channel_ready_in(uint idx) {
+static void channel_read(uint idx) {
   struct channel *ch = channels[idx];
-  debug("Channel %d (fd %d) ready in (ord %d)\n", idx, ch->ifd, ch->ord);
   ch->iev = 0;
-  ch->ird = 1;
 
-  if (ch->ord)
-    channel_ready_both(idx);
-}
+  debug("Channel read: %d\n", idx);
 
-static void channel_ready_out(uint idx) {
-  struct channel *ch = channels[idx];
-  debug("Channel %d (fd %d) ready out (ird %d)\n", idx, ch->ofd, ch->ird);
-  ch->oev = 0;
-  ch->ord = 1;
+  /* Read some data */
+  ssize_t sz = read(ch->ifd, ch->bto, (ch->bend - ch->bto));
+  if (sz < 0) {
+    fprintf(stderr, "Error reading from %d: %m\n", ch->ifd);
+    fatal();
+  }
 
-  if (ch->ird)
-    channel_ready_both(idx);
-  else if (ch->bto > ch->bfrom)
-    channel_write(idx);
+  if (sz == 0)
+    return channel_close_in(idx);
+
+  /* Close in may have closed the channel at all */
+  if (!channels[idx])
+    return;
+
+  ch->bto += sz;
+
+  debug("Channel %d read %d bytes of data (first byte %02x)\n", idx, sz, ch->bto[-sz]);
+
+  if (ch->bend > ch->bto)
+    channel_wait_in(idx);
+
+  channel_write(idx);
 }
 
 static void channel_flush(uint idx) {
   struct channel *ch = channels[idx];
   debug("Flushing (fd %d) channel %d\n", ch->ifd, idx);
   ch->hup = 1;
-  channel_ready_in(idx);
+  channel_write(idx);
 }
 
 static struct channel *channel_init(int ifd, int ofd, const char *fmt) {
@@ -278,11 +246,8 @@ static struct channel *channel_init(int ifd, int ofd, const char *fmt) {
   ch->ifd = ifd;
   ch->ofd = ofd;
 
-  SC(fcntl, ifd, F_SETFL, O_NONBLOCK);
-  SC(fcntl, ofd, F_SETFL, O_NONBLOCK);
-
-  channel_wait_in(ch->idx);
-  channel_wait_out(ch->idx);
+  SC(fcntl, ch->ofd, F_SETFL, O_NONBLOCK);
+  SC(fcntl, ch->ifd, F_SETFL, O_NONBLOCK);
 
   ch->buf = malloc(BUFSIZE);
 
@@ -333,6 +298,9 @@ static struct channel *channel_init(int ifd, int ofd, const char *fmt) {
   ch->bend = ch->buf + BUFSIZE;
 
   ch->bol = 1;
+
+  channel_wait_in(ch->idx);
+
   return ch;
 }
 
@@ -498,12 +466,6 @@ int main(int argc, char **argv) {
 	  .events = POLLOUT,
 	};
       }
-
-      debug("Channel %d state: iev %d oev %d ird %d ord %d data %d\n",
-	  i,
-	  channels[i]->iev, channels[i]->oev,
-	  channels[i]->ird, channels[i]->ord,
-	  channels[i]->bto - channels[i]->bfrom);
     }
     debug("Total pollfds: %d\n", nfds);
 
@@ -514,18 +476,41 @@ int main(int argc, char **argv) {
 
     if (n > 0) {
       for (int i=0; i<3; i++) {
-	if (channels[i] && channels[i]->iev)
-	  if (pfd[channels[i]->ipp].revents & POLLIN)
-	    channel_ready_in(i);
-	  else if (pfd[channels[i]->ipp].revents || channels[i]->hup)
-	    channel_close_in(i);
+	uint state = 0;
+	
+#define CH_READ	  1
+#define CH_WRITE  2
+#define CH_HUP	  4
+#define CH_CLOSE  8
 
-	if (channels[i] && channels[i]->oev && pfd[channels[i]->opp].revents)
+	if (channels[i] && channels[i]->oev && pfd[channels[i]->opp].revents) {
+	  debug("Channel %d OUT got 0x%x in poll\n", i, pfd[channels[i]->opp].revents);
 	  if (pfd[channels[i]->opp].revents & POLLOUT)
-	    channel_ready_out(i);
+	    state |= CH_WRITE;
 	  else
-	    channel_close(i);
+	    state |= CH_CLOSE;
+	}
+
+	if (channels[i] && channels[i]->iev) {
+	  debug("Channel %d IN got 0x%x in poll\n", i, pfd[channels[i]->opp].revents);
+	  if (pfd[channels[i]->ipp].revents & POLLIN)
+	    state |= CH_READ;
+	  else if (pfd[channels[i]->ipp].revents || channels[i]->hup)
+	    state |= CH_HUP;
+	}
+
+	if (state & CH_CLOSE)
+	  channel_close(i);
+	else if (state & CH_HUP)
+	  channel_close_in(i);
+	else {
+	  if (state & CH_WRITE)
+	    channel_write(i);
+	  if (state & CH_READ)
+	    channel_read(i);
+	}
       }
+
       if (pfd[0].revents & POLLIN) {
 	process_signal(sfd);
       }
@@ -534,7 +519,7 @@ int main(int argc, char **argv) {
     else if ((errno == EAGAIN) || (errno == EINTR))
       continue;
     else {
-      perror("Error calling epoll_wait:");
+      perror("Error calling poll:");
       fatal();
     }
   }
