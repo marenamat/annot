@@ -138,6 +138,27 @@ static void channel_write(uint idx) {
 
   ch->oev = 0;
   while (1) {
+    /* Empty buffer */
+    if (ch->bfrom >= ch->bto) {
+      if (ch->hup)
+	return channel_close(idx);
+
+      ch->bfrom = ch->bto = ch->buf + ch->bskip;
+      channel_wait_in(idx);
+      return;
+    }
+
+    /* Move to beginning */
+    if ((ch->bend - ch->bto) > (ch->bfrom - ch->buf + ch->bskip)) {
+      char *nb = ch->buf + ch->bskip;
+      char *ne = nb + (ch->bto - ch->bfrom);
+      char *nl = ch->bnl - (ch->bfrom - nb);
+      memmove(nb, ch->bfrom, ne - nb);
+      ch->bfrom = nb;
+      ch->bto = ne;
+      ch->bnl = nl;
+    }
+
     /* Prepend annotation if we should do it. */
     if (ch->fmtpre) {
       ch->bnl = ch->bfrom;
@@ -176,27 +197,6 @@ static void channel_write(uint idx) {
     /* Check end of line */
     if (ch->bskip && (ch->bfrom[-1] == '\n'))
       ch->bol = 1;
-
-    /* Empty buffer */
-    if (ch->bfrom >= ch->bto) {
-      if (ch->hup)
-	return channel_close(idx);
-
-      ch->bfrom = ch->bto = ch->buf + ch->bskip;
-      channel_wait_in(idx);
-      return;
-    }
-
-    /* Move to beginning */
-    if ((ch->bend - ch->bto) > (ch->bfrom - ch->buf + ch->bskip)) {
-      char *nb = ch->buf + ch->bskip;
-      char *ne = nb + (ch->bto - ch->bfrom);
-      char *nl = ch->bnl - (ch->bfrom - nb);
-      memmove(nb, ch->bfrom, ne - nb);
-      ch->bfrom = nb;
-      ch->bto = ne;
-      ch->bnl = nl;
-    }
   }
 }
 
