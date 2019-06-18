@@ -31,6 +31,7 @@
 //#define debug(...)
 
 static pid_t child = -1;
+static int done = 0;
 
 FILE *debugfile;
 
@@ -60,7 +61,6 @@ struct channel {
 
 static struct channel *channels[3];
 int finished_channels = 0;
-int chn = 0;
 
 static void channel_wait_in(uint idx) {
   struct channel *ch = channels[idx];
@@ -237,11 +237,12 @@ static void channel_flush(uint idx) {
   channel_write(idx);
 }
 
-static struct channel *channel_init(int ifd, int ofd, const char *fmt) {
+static struct channel *channel_init(int idx, int ifd, int ofd, const char *fmt) {
   struct channel *ch = malloc(sizeof(struct channel));
   memset(ch, 0, sizeof(struct channel));
 
-  channels[ch->idx = chn++] = ch;
+  channels[idx] = ch;
+  ch->idx = idx;
 
   ch->ifd = ifd;
   ch->ofd = ofd;
@@ -331,18 +332,22 @@ static void process_signal(int fd) {
 
   if (channels[2])
     channel_flush(2);
+
+  done = 1;
 }
 
 void usage(int exitcode) {
   fputs(
       "Output and error annotator. Usage:\n"
-      "	annot [-D debugfile] command [args]\n"
+      "	annot [-i] [-D debugfile] command [args]\n"
       "	annot [-h]\n"
       "\n"
       "Runs the given command with args.\n"
       "Options:\n"
-      "	-D debugfile -- write debug messages to this file\n"
-      "	-h -- show this help and exit\n"
+      "	-D debugfile	write debug messages to this file\n"
+      " -i	read from stdin (may break pagers and others in the pipeline\n"
+      "		who are reading directly from tty)\n"
+      "	-h	show this help and exit\n"
       , stderr);
   exit(exitcode);
 }
@@ -351,7 +356,8 @@ int main(int argc, char **argv) {
   char *debugfilename = NULL;
 
   int opt;
-  while ((opt = getopt(argc, argv, "D:")) != -1) {
+  int use_stdin = 0;
+  while ((opt = getopt(argc, argv, "D:hi")) != -1) {
     switch (opt) {
       case 'D':
 	debugfilename = optarg;
@@ -363,6 +369,9 @@ int main(int argc, char **argv) {
 	break;
       case 'h':
 	usage(0);
+	break;
+      case 'i':
+	use_stdin = 1;
 	break;
       default:
 	fprintf(stderr, "Bad command line option: -%c\n\n", opt);
@@ -391,16 +400,8 @@ int main(int argc, char **argv) {
   SC(tcsetattr, ops, TCSANOW, &ts);
 
   int ins[2];
-  SC(socketpair, AF_UNIX, SOCK_STREAM, 0, ins);
-
-  /*
-  struct stat ist, ost, est;
-  SC(fstat, 0, &ist);
-  SC(fstat, 1, &ost);
-  SC(fstat, 2, &est);
-
-  debug("ioe reg: %d %d %d\n", S_ISREG(ist.st_mode), S_ISREG(ost.st_mode), S_ISREG(est.st_mode));
-  */
+  if (use_stdin)
+    SC(socketpair, AF_UNIX, SOCK_STREAM, 0, ins);
 
   sigset_t sfdmask;
   sigemptyset(&sfdmask);
@@ -417,11 +418,14 @@ int main(int argc, char **argv) {
   if (!child) {
     SC(close, epm);
     SC(close, opm);
-    SC(close, ins[0]);
+    if (use_stdin)
+      SC(close, ins[0]);
 
     SC(close, 0);
-    SC(dup2, ins[1], 0);
-    SC(close, ins[1]);
+    if (use_stdin) {
+      SC(dup2, ins[1], 0);
+      SC(close, ins[1]);
+    }
 
     SC(close, 1);
     SC(dup2, ops, 1);
@@ -438,17 +442,23 @@ int main(int argc, char **argv) {
 
   SC(close, ins[1]);
 
-  channel_init(0, ins[0], NULL),
-  channel_init(opm, 1, "%Y-%m-%d %H:%M:%S.%f LOG "),
-  channel_init(epm, 2, "%Y-%m-%d %H:%M:%S.%f ERR ");
+  if (use_stdin)
+    channel_init(0, 0, ins[0], NULL);
+
+  channel_init(1, opm, 1, "%Y-%m-%d %H:%M:%S.%f LOG ");
+  channel_init(2, epm, 2, "%Y-%m-%d %H:%M:%S.%f ERR ");
 
   while (finished_channels < 3) {
     struct pollfd pfd[7];
     int nfds = 0;
-    pfd[nfds++] = (struct pollfd) {
-      .fd = sfd,
-      .events = POLLIN,
-    };
+
+    if (!done) {
+      pfd[nfds++] = (struct pollfd) {
+	.fd = sfd,
+	.events = POLLIN,
+      };
+    }
+
     for (int i=0; i<3; i++) {
       if (!channels[i])
 	continue;
@@ -467,9 +477,10 @@ int main(int argc, char **argv) {
 	};
       }
     }
+
     debug("Total pollfds: %d\n", nfds);
 
-    if (!nfds)
+    if (nfds == 0)
       exit(0);
 
     int n = poll(pfd, nfds, -1);
