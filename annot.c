@@ -27,10 +27,12 @@
 
 #define SC(what, ...) do { if (what(__VA_ARGS__) < 0) { perror("Error calling " #what ":"); fatal(); } } while (0)
 
-//#define debug printf
-#define debug(...)
+#define debug(...) do { if (debugfile) { fprintf(debugfile, __VA_ARGS__); fflush(debugfile); } } while (0)
+//#define debug(...)
 
 static pid_t child = -1;
+
+FILE *debugfile;
 
 static void fatal(void) {
   if (child != -1)
@@ -193,7 +195,8 @@ static void channel_write(uint idx) {
       ch->bnl = ch->bto;
 
     /* Write some data */
-    size_t sz = write(ch->ofd, ch->bfrom, ch->bnl - ch->bfrom);
+    ssize_t sz = write(ch->ofd, ch->bfrom, ch->bnl - ch->bfrom);
+    debug("Write output: %zd (%d -> %m)\n", sz, errno);
     if (sz < 0) {
       if (errno == EAGAIN) {
 	ch->ord = 0;
@@ -209,10 +212,10 @@ static void channel_write(uint idx) {
 
     ch->bfrom += sz;
 
-    debug("Channel %d wrote %d bytes of data\n", idx, sz);
+    debug("Channel %d wrote %zd bytes of data\n", idx, sz);
 
     /* Check end of line */
-    if (ch->bfrom[-1] == '\n')
+    if (ch->bskip && (ch->bfrom[-1] == '\n'))
       ch->bol = 1;
 
     /* Empty buffer */
@@ -336,7 +339,7 @@ static struct channel *channel_init(int ifd, int ofd, const char *fmt) {
 static void process_signal(int fd) {
   debug("Got signal!\n");
   struct signalfd_siginfo i;
-  size_t sz = read(fd, &i, sizeof(i));
+  ssize_t sz = read(fd, &i, sizeof(i));
   if (sz != sizeof(i)) {
     debug("Short read from signalfd: %zd, want %zu", sz, sizeof(i));
     fatal();
@@ -362,7 +365,49 @@ static void process_signal(int fd) {
     channel_flush(2);
 }
 
+void usage(int exitcode) {
+  fputs(
+      "Output and error annotator. Usage:\n"
+      "	annot [-D debugfile] command [args]\n"
+      "	annot [-h]\n"
+      "\n"
+      "Runs the given command with args.\n"
+      "Options:\n"
+      "	-D debugfile -- write debug messages to this file\n"
+      "	-h -- show this help and exit\n"
+      , stderr);
+  exit(exitcode);
+}
+
 int main(int argc, char **argv) {
+  char *debugfilename = NULL;
+
+  int opt;
+  while ((opt = getopt(argc, argv, "D:")) != -1) {
+    switch (opt) {
+      case 'D':
+	debugfilename = optarg;
+	debugfile = fopen(debugfilename, "w");
+	if (!debugfile) {
+	  fprintf(stderr, "Couldn't open debug file %s: %m", debugfilename);
+	  exit(1);
+	}
+	break;
+      case 'h':
+	usage(0);
+	break;
+      default:
+	fprintf(stderr, "Bad command line option: -%c\n\n", opt);
+	usage(2);
+	break;
+    }
+  }
+
+  if (optind >= argc) {
+    fprintf(stderr, "Command expected");
+    usage(2);
+  }
+
   int epm, eps, opm, ops;
 
   SC(openpty, &epm, &eps, NULL, NULL, NULL);
@@ -418,7 +463,7 @@ int main(int argc, char **argv) {
     SC(dup2, eps, 2);
     SC(close, eps);
 
-    SC(execvp, argv[1], argv+1);
+    SC(execvp, argv[optind], argv+optind);
 
     abort();
   }
