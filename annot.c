@@ -37,10 +37,12 @@ FILE *debugfile;
 
 static void fatal(void) {
   if (child != -1)
-    kill(child, SIGKILL);
+  {
+    sleep(1);
+    kill(child, SIGTERM);
+  }
 
   abort();
-  exit(42);
 }
 
 typedef unsigned int uint;
